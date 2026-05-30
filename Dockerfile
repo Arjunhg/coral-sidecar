@@ -1,4 +1,4 @@
-FROM node:20-slim
+FROM node:22-trixie-slim
 
 # Install Coral via the official install script
 RUN apt-get update && apt-get install -y curl ca-certificates && rm -rf /var/lib/apt/lists/*
