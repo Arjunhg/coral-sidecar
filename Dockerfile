@@ -6,7 +6,7 @@ ENV CORAL_INSTALL_DIR=/usr/local/bin
 RUN curl -fsSL https://withcoral.com/install.sh | sh
 
 WORKDIR /app
-COPY package.json package-lock.json ./
+COPY package.json package.json ./
 RUN npm ci --omit=dev
 COPY . .
 
