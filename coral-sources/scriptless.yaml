@@ -1,0 +1,131 @@
+﻿name: scriptless
+version: 0.1.0
+dsl_version: 3
+backend: http
+description: Scriptless.ai test cases and connected repositories as a Coral source.
+
+inputs:
+  SCRIPTLESS_API_KEY:
+    kind: secret
+    hint: Generate from Scriptless workspace API Keys.
+  SCRIPTLESS_BASE_URL:
+    kind: variable
+    default: https://scriptless-ai-eta.vercel.app
+
+base_url: "{{input.SCRIPTLESS_BASE_URL}}"
+
+auth:
+  type: HeaderAuth
+  headers:
+    - name: Authorization
+      from: template
+      template: "Bearer {{input.SCRIPTLESS_API_KEY}}"
+
+tables:
+  - name: test_cases
+    description: AI-generated Scriptless test cases and run metadata.
+    filters:
+      - name: status
+        type: Utf8
+      - name: type
+        type: Utf8
+      - name: repo_name
+        type: Utf8
+    request:
+      method: GET
+      path: /api/coral/expose/test_cases
+      query:
+        - name: status
+          from: filter
+          key: status
+        - name: type
+          from: filter
+          key: type
+        - name: repo_name
+          from: filter
+          key: repo_name
+        - name: page_size
+          from: literal
+          value: 100
+    response:
+      rows_path: [rows]
+      pagination:
+        mode: page
+        page_param: page
+        page_start: 0
+        page_step: 1
+        page_size:
+          default: 50
+          max: 100
+          query_param: page_size
+        max_pages: 50
+      columns:
+        - name: id
+          type: Int64
+        - name: title
+          type: Utf8
+        - name: description
+          type: Utf8
+        - name: type
+          type: Utf8
+        - name: priority
+          type: Utf8
+        - name: status
+          type: Utf8
+        - name: repo_owner
+          type: Utf8
+        - name: repo_name
+          type: Utf8
+        - name: branch
+          type: Utf8
+        - name: target_route
+          type: Utf8
+        - name: target_files
+          type: Json
+        - name: expected_result
+          type: Utf8
+        - name: session_id
+          type: Utf8
+        - name: session_url
+          type: Utf8
+        - name: has_vision_analysis
+          type: Boolean
+        - name: created_at
+          type: Timestamp
+
+  - name: repositories
+    description: GitHub repositories connected to Scriptless.
+    request:
+      method: GET
+      path: /api/coral/expose/repositories
+      query:
+        - name: page_size
+          from: literal
+          value: 100
+    response:
+      rows_path: [rows]
+      pagination:
+        mode: page
+        page_param: page
+        page_start: 0
+        page_step: 1
+        max_pages: 10
+      columns:
+        - name: repo_id
+          type: Int64
+        - name: name
+          type: Utf8
+        - name: full_name
+          type: Utf8
+        - name: owner
+          type: Utf8
+        - name: language
+          type: Utf8
+        - name: default_branch
+          type: Utf8
+        - name: target_domain
+          type: Utf8
+
+test_queries:
+  - "SELECT count(*) AS n FROM scriptless.test_cases"
+  - "SELECT name FROM scriptless.repositories"

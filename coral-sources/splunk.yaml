@@ -1,0 +1,159 @@
+name: splunk
+version: 0.1.0
+dsl_version: 3
+backend: http
+description: Splunk saved searches, fired alerts, index metadata, and ad-hoc search export as a Coral source.
+
+inputs:
+  SPLUNK_HOST:
+    kind: variable
+    hint: Splunk management API base URL, usually https://host:8089
+  SPLUNK_TOKEN:
+    kind: secret
+    hint: Read-scoped Splunk API token for the management API
+  SPLUNK_PROXY_BASE_URL:
+    kind: variable
+    default: http://127.0.0.1:3000/splunk-proxy
+    hint: Local Coral sidecar proxy that normalizes Splunk REST responses for Coral
+
+base_url: "{{input.SPLUNK_PROXY_BASE_URL}}"
+
+request_headers:
+  - name: Accept
+    from: literal
+    value: application/json
+  - name: X-Splunk-Host
+    from: template
+    template: "{{input.SPLUNK_HOST}}"
+  - name: X-Splunk-Token
+    from: template
+    template: "{{input.SPLUNK_TOKEN}}"
+
+tables:
+  - name: saved_searches
+    description: Saved Splunk searches and alert definitions. Useful for understanding scheduled searches, alert conditions, and saved SPL.
+    request:
+      method: GET
+      path: /saved-searches
+    response:
+      rows_path: [rows]
+    columns:
+      - name: name
+        type: Utf8
+      - name: id
+        type: Utf8
+      - name: updated
+        type: Timestamp
+      - name: description
+        type: Utf8
+      - name: search
+        type: Utf8
+      - name: disabled
+        type: Boolean
+      - name: cron_schedule
+        type: Utf8
+      - name: actions
+        type: Utf8
+      - name: alert_type
+        type: Utf8
+      - name: alert_condition
+        type: Utf8
+      - name: alert_threshold
+        type: Utf8
+      - name: raw_content
+        type: Json
+
+  - name: fired_alerts
+    description: Fired alert activity from Splunk. Useful for security and operational incident review.
+    request:
+      method: GET
+      path: /fired-alerts
+    response:
+      rows_path: [rows]
+    columns:
+      - name: name
+        type: Utf8
+      - name: id
+        type: Utf8
+      - name: updated
+        type: Timestamp
+      - name: triggered_alert_count
+        type: Int64
+      - name: raw_content
+        type: Json
+
+  - name: indexes
+    description: Splunk index metadata including event counts, size, and storage paths.
+    request:
+      method: GET
+      path: /indexes
+    response:
+      rows_path: [rows]
+    columns:
+      - name: name
+        type: Utf8
+      - name: id
+        type: Utf8
+      - name: updated
+        type: Timestamp
+      - name: datatype
+        type: Utf8
+      - name: disabled
+        type: Boolean
+      - name: total_event_count
+        type: Int64
+      - name: current_db_size_mb
+        type: Utf8
+      - name: max_total_data_size_mb
+        type: Int64
+      - name: is_internal
+        type: Boolean
+      - name: home_path
+        type: Utf8
+      - name: cold_path
+        type: Utf8
+      - name: raw_content
+        type: Json
+
+functions:
+  - name: search_results
+    description: Run a bounded Splunk SPL export query and return rows of log or event data.
+    kind: search
+    args:
+      - name: search
+        required: true
+        bind:
+          arg: search
+    search_limits:
+      default_top_k: 25
+      max_top_k: 100
+      max_calls_per_query: 1
+    request:
+      method: GET
+      path: /search-results
+      query:
+        - name: search
+          from: arg
+          key: search
+    response:
+      rows_path: [rows]
+    columns:
+      - name: _time
+        type: Utf8
+      - name: host
+        type: Utf8
+      - name: source
+        type: Utf8
+      - name: sourcetype
+        type: Utf8
+      - name: _raw
+        type: Utf8
+      - name: index
+        type: Utf8
+      - name: splunk_server
+        type: Utf8
+
+test_queries:
+  - "SELECT name, datatype, total_event_count FROM splunk.indexes LIMIT 5"
+  - "SELECT name, disabled, cron_schedule FROM splunk.saved_searches LIMIT 5"
+  - "SELECT _time, host, source, sourcetype, _raw, index FROM splunk.search_results(search => 'search index=_internal | head 2 | fields _time host source sourcetype _raw index splunk_server') LIMIT 2"
