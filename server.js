@@ -21,6 +21,9 @@ const DEFAULT_TIMEOUT_MS = 15_000;
 const MAX_SQL_LEN = 8000; 
 
 function authenticate(req, res, next) {
+  console.log("Header: ", req.headers["x-sidecar-secret"]);
+  console.log("Env: ", process.env.SIDECAR_SHARED_SECRET);
+  console.log("Equals: ", req.headers["x-sidecar-secret"]===process.env.SIDECAR_SHARED_SECRET);
   const got = req.headers["x-sidecar-secret"];
   if (!SHARED_SECRET || got !== SHARED_SECRET) {
     return res.status(401).json({ error: "unauthorized" });
