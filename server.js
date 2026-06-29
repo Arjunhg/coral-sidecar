@@ -1,8 +1,10 @@
+import "dotenv/config";
 import express from "express";
 import fs from "node:fs";
 import path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import dotenv from "dotenv";
 
 const exec = promisify(execFile);
 const app = express();
@@ -253,6 +255,30 @@ function getTenantIdFromRequest(req) {
   return { tenantId };
 }
 
+const CORAL_SOURCES_DIR = process.env.CORAL_SOURCES_DIR || "";
+
+function resolveSourceManifestPath(source) {
+  const candidates = [
+    // Explicit override via env var (highest priority)
+    ...(CORAL_SOURCES_DIR ? [path.join(CORAL_SOURCES_DIR, `${source}.yaml`)] : []),
+    // Inside the coral config directory
+    path.join(CORAL_CONFIG_DIR, "coral-sources", `${source}.yaml`),
+    path.join(CORAL_CONFIG_DIR, "sources", `${source}.yaml`),
+    // Relative to sidecar cwd
+    path.join(process.cwd(), "coral-sources", `${source}.yaml`),
+    path.join(process.cwd(), "..", "coral-sources", `${source}.yaml`),
+    // Docker / absolute paths
+    path.join("/app", "coral-sources", `${source}.yaml`),
+    path.join("/coral-sources", `${source}.yaml`),
+  ];
+
+  const found = candidates.find((candidate) => fs.existsSync(candidate)) || null;
+  if (!found) {
+    console.error(`[sidecar] source_manifest_not_found for "${source}". Searched:\n${candidates.map(c => `  - ${c}`).join("\n")}`);
+  }
+  return found;
+}
+
 function normalizeSplunkEntry(entry, mapper) {
   const content = entry?.content && typeof entry.content === "object" ? entry.content : {};
   return mapper(entry, content);
@@ -397,7 +423,14 @@ app.get("/list-catalog", authenticate, async (req, res) => {
 
   const resolved = await resolveCoralConfigForTenant(tenant?.tenantId);
   console.log(`[sidecar][tenant:${resolved.tenantId ?? "shared"}][scope:${resolved.scope}] /list-catalog`);
-  const result = await runCoralWithConfig(resolved.configDir, [
+
+  // NOTE: These two relations are queried separately and merged in JS rather
+  // than via a single SQL `UNION ALL`. Combining the plain column scan from
+  // coral.tables with the aggregated (string_agg/COALESCE) column from
+  // coral.table_functions triggers an Apache Arrow / DataFusion offset-buffer
+  // bug: "Offset invariant failure: non-monotonic offset". Running them apart
+  // avoids the engine concatenating those two Utf8 buffers.
+  const tablesResult = await runCoralWithConfig(resolved.configDir, [
     "sql",
     "--format",
     "json",
@@ -406,37 +439,47 @@ app.get("/list-catalog", authenticate, async (req, res) => {
             description,
             required_filters,
             guide,
-            relation_type
-     FROM (
-       SELECT schema_name,
-              table_name,
-              description,
-              required_filters,
-              guide,
-              'table' AS relation_type
-       FROM coral.tables
-       UNION ALL
-       SELECT tf.schema_name,
-              tf.function_name AS table_name,
-              tf.description,
-              COALESCE(string_agg(CASE WHEN f.is_required THEN f.filter_name END, ', ' ORDER BY f.filter_name), '') AS required_filters,
-              CASE
-                WHEN tf.kind = 'search' THEN 'Call as a table function: schema.function(arg => ''value'').'
-                ELSE 'Call as a table function with named arguments.'
-              END AS guide,
-              'table_function' AS relation_type
-       FROM coral.table_functions tf
-       LEFT JOIN coral.filters f
-         ON f.schema_name = tf.schema_name
-        AND f.table_name = tf.function_name
-       GROUP BY tf.schema_name, tf.function_name, tf.description, tf.kind
-     ) catalog
-     ORDER BY schema_name, table_name`,
+            'table' AS relation_type
+     FROM coral.tables`,
   ]);
-  if (!result.ok) {
-    return res.status(422).json({ error: "catalog_failed", detail: result.stderr });
+  if (!tablesResult.ok) {
+    return res.status(422).json({ error: "catalog_failed", detail: tablesResult.stderr });
   }
-  res.json({ tables: JSON.parse(result.stdout || "[]") });
+
+  const functionsResult = await runCoralWithConfig(resolved.configDir, [
+    "sql",
+    "--format",
+    "json",
+    `SELECT tf.schema_name,
+            tf.function_name AS table_name,
+            tf.description,
+            COALESCE(string_agg(CASE WHEN f.is_required THEN f.filter_name END, ', ' ORDER BY f.filter_name), '') AS required_filters,
+            CASE
+              WHEN tf.kind = 'search' THEN 'Call as a table function: schema.function(arg => ''value'').'
+              ELSE 'Call as a table function with named arguments.'
+            END AS guide,
+            'table_function' AS relation_type
+     FROM coral.table_functions tf
+     LEFT JOIN coral.filters f
+       ON f.schema_name = tf.schema_name
+      AND f.table_name = tf.function_name
+     GROUP BY tf.schema_name, tf.function_name, tf.description, tf.kind`,
+  ]);
+  if (!functionsResult.ok) {
+    return res.status(422).json({ error: "catalog_failed", detail: functionsResult.stderr });
+  }
+
+  try {
+    const tables = JSON.parse(tablesResult.stdout || "[]");
+    const functions = JSON.parse(functionsResult.stdout || "[]");
+    const catalog = [...tables, ...functions].sort((a, b) => {
+      const schemaCmp = String(a.schema_name).localeCompare(String(b.schema_name));
+      return schemaCmp !== 0 ? schemaCmp : String(a.table_name).localeCompare(String(b.table_name));
+    });
+    res.json({ tables: catalog });
+  } catch (e) {
+    res.status(500).json({ error: "invalid_coral_output", detail: e.message });
+  }
 });
 
 app.get("/list-columns", authenticate, async (req, res) => {
@@ -496,8 +539,8 @@ app.post("/provision", authenticate, async (req, res) => {
     return res.status(400).json({ error: "vars must be an object" });
   }
 
-  const sourceFile = path.join(process.cwd(), "coral-sources", `${source}.yaml`);
-  if (!fs.existsSync(sourceFile)) {
+  const sourceFile = resolveSourceManifestPath(source);
+  if (!sourceFile) {
     return res.status(404).json({ error: "source_manifest_not_found" });
   }
 
@@ -678,6 +721,22 @@ try {
     const defaultConfig = { initializedAt: new Date().toISOString(), version: "1.0.0" };
     fs.writeFileSync(CONFIG_PATH, JSON.stringify(defaultConfig, null, 2));
     console.log(`Initialized default config template at ${CONFIG_PATH}`);
+  }
+
+  // Auto-seed coral-sources into CORAL_CONFIG_DIR if they exist locally but not in config dir
+  const localSourcesDirs = [
+    path.join(process.cwd(), "coral-sources"),
+    path.join(process.cwd(), "..", "coral-sources"),
+  ];
+  const configSourcesDir = path.join(CORAL_CONFIG_DIR, "coral-sources");
+  if (!fs.existsSync(configSourcesDir)) {
+    for (const srcDir of localSourcesDirs) {
+      if (fs.existsSync(srcDir)) {
+        fs.cpSync(srcDir, configSourcesDir, { recursive: true });
+        console.log(`Seeded coral-sources from ${srcDir} → ${configSourcesDir}`);
+        break;
+      }
+    }
   }
 } catch (error) {
   console.error("Failed to initialize volume paths:", error);
